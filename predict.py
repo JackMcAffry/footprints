@@ -1,4 +1,4 @@
-from footprints.predict_simple import InferenceManager, parse_args
+from footprints.predict_simple import InferenceManager
 import torch
 import os
 import cv2
@@ -6,6 +6,8 @@ from footprints.utils import sigmoid_to_depth
 import numpy as np
 from scipy import ndimage
 from matplotlib import colors as clr
+from sklearn.cluster import DBSCAN
+
 
 
 class Point:
@@ -73,7 +75,28 @@ def find_clusters(array):
 		print("Cluster #{}: {} elementi '{}' at {}".format(i, clustersInfo[i].dimensione, clustersInfo[i].valore, clustersInfo[i].com))
 	return clustered, cluster_count, clustersInfo, feet
 
+def from_matrix_to_points_array(matrix, width, heigth):
+    result = []
+    for i in range(width):
+        for j in range(heigth):
+            if matrix[i][j] == False:
+                result.append([i, j])
+    return result
 
+def from_points_array_to_matrix(coordinates_matrix, labels, width, heigth):
+	result = [[0 for i in range(width)] for j in range(heigth)]
+	for k in range(len(coordinates_matrix)):
+		x = coordinates_matrix[k][0]
+		y = coordinates_matrix[k][1]
+		result[x][y] = labels[k] + 1
+	return result
+
+def find_clusters_db_scan(matrix):
+	heigth, width = matrix.shape
+	coordinates_matrix = from_matrix_to_points_array(matrix, heigth, width)
+	labels = list(DBSCAN(eps=2, min_samples=2).fit(coordinates_matrix).labels_)
+	return from_points_array_to_matrix(coordinates_matrix, labels, width, heigth)
+    
 def findNearest(center_of_mass):
 	return int(round(center_of_mass[0])), int(round(center_of_mass[1]))
 
@@ -165,66 +188,99 @@ class ObstacleManager(InferenceManager):
 		print("└> Saving predictions to {}".format(npy_save_path))
 		np.save(npy_save_path, pred)
 
+		clust_method = 1
 		if self.save_visualisations:
-			# print(pred[1].shape, pred.shape)
-			# tutti i pred[0 -> 3] hanno shape (256, 448)
-			hidden_ground = cv2.resize(pred[1], original_image.size) > 0.95
-			print(hidden_ground.shape)
-			clusters, numeroCluster, clustersInfo, feet = find_clusters(hidden_ground)
-			feet = np.expand_dims(feet, axis=2).astype(np.int)
-			print(feet.shape)
-			hidden_depth = cv2.resize(sigmoid_to_depth(pred[3]), original_image.size)
-			# TODO: da qui indentificare il centro di ogni footprint e vedere la distanza nello stesso punto della
-			# hidden_depth in modo da vedere quanto è distante nella scena
-			original_image = np.array(original_image) / 255.0
+			if clust_method == 0:
+				#print(pred[1].shape, pred.shape)
+				#tutti i pred[0 -> 3] hanno shape (256, 448)
+				hidden_ground = cv2.resize(pred[1], original_image.size) > 0.95
+				clusters, numeroCluster, clustersInfo, feet = find_clusters(hidden_ground)
+				feet = np.expand_dims(feet, axis=2).astype(np.int)
+				hidden_depth = cv2.resize(sigmoid_to_depth(pred[3]), original_image.size)
+				#TODO: da qui indentificare il centro di ogni footprint e vedere la distanza nello stesso punto della
+				#hidden_depth in modo da vedere quanto è distante nella scena
+				original_image = np.array(original_image) / 255.0
 
-			# normalise the relevant parts of the depth map and apply colormap
-			_max = hidden_depth[hidden_ground].max()
-			_min = hidden_depth[hidden_ground].min()
-			hidden_depth = (hidden_depth - _min) / (_max - _min)
-			depth_colourmap = self.colormap(hidden_depth)[:, :, :3]  # ignore alpha channel
+				# normalise the relevant parts of the depth map and apply colormap
+				_max = hidden_depth[hidden_ground].max()
+				_min = hidden_depth[hidden_ground].min()
+				hidden_depth = (hidden_depth - _min) / (_max - _min)
+				depth_colourmap = self.colormap(hidden_depth)[:, :, :3]  # ignore alpha channel
 
-			# create and save visualisation image
-			hidden_ground = hidden_ground[:, :, None]
-			# visualisation = original_image * (1 - hidden_ground)# + depth_colourmap * hidden_ground
-			visualisation = original_image * (1 - hidden_ground) + depth_colourmap * hidden_ground
-			# visualisation = original_image * 0.05 + depth_colourmap * 0.95
-			# on = np.ones(shape=(682, 1024, 1))
-			# off = np.zeros(shape=(682, 1024, 1))
-			# colors = np.concatenate((on, off, off), axis=2)
-			# visualisation = original_image * (1 - feet) + feet * colors #np.ones(shape=original_image.shape)
-			visualisation = original_image * (1 - feet) + feet * depth_colourmap
-			vis_save_path = os.path.join(self.save_dir, "visualisations", filename + '.jpg')
-			print(visualisation.shape)
+				# create and save visualisation image
+				hidden_ground = hidden_ground[:, :, None]
+				# visualisation = original_image * (1 - hidden_ground)# + depth_colourmap * hidden_ground
+				visualisation = original_image * (1 - hidden_ground) + depth_colourmap * hidden_ground
+				# visualisation = original_image * 0.05 + depth_colourmap * 0.95
+				# on = np.ones(shape=(682, 1024, 1))
+				# off = np.zeros(shape=(682, 1024, 1))
+				# colors = np.concatenate((on, off, off), axis=2)
+				# visualisation = original_image * (1 - feet) + feet * colors #np.ones(shape=original_image.shape)
+				visualisation = original_image * (1 - feet) + feet * depth_colourmap
+				vis_save_path = os.path.join(self.save_dir, "visualisations", filename + '.jpg')
+				print(visualisation.shape)
 
-			# trovo i baricentri dei clusters e li associo all'immagine
-			points = [Point(clusterInfo.com[0], clusterInfo.com[1]) for clusterInfo in clustersInfo.values() if
-							clusterInfo.isFoot]
-			visualisation = draw_points(visualisation, points, radius=1)
+				# trovo i baricentri dei clusters e li associo all'immagine
+				points = [Point(clusterInfo.com[0], clusterInfo.com[1]) for clusterInfo in clustersInfo.values() if
+								clusterInfo.isFoot]
+				visualisation = draw_points(visualisation, points, radius=1)
 
-			# a partire dai baricentri accoppio i piedi identificando le persone e associo questi punti all'immagine
-			peoplePoints = onePointEachPerson(points, 31)  # massima distanza tollerabile tra i piedi
-			visualisation = draw_points(visualisation, peoplePoints, colorPoints=clr.to_rgba('yellow'))
+				# a partire dai baricentri accoppio i piedi identificando le persone e associo questi punti all'immagine
+				peoplePoints = onePointEachPerson(points, 31)  # massima distanza tollerabile tra i piedi
+				visualisation = draw_points(visualisation, peoplePoints, colorPoints=clr.to_rgba('yellow'))
 
-			# associo all'immagine le linee che uniscono le persone con tag riferito a distanza
-			visualisation = draw_distance(img=visualisation, points=peoplePoints, maxDistance=100)
+				# associo all'immagine le linee che uniscono le persone con tag riferito a distanza
+				visualisation = draw_distance(img=visualisation, points=peoplePoints, maxDistance=100)
 
-			# associo all'immagine un tag per ogni persona con scritto la distanza della persona piu vicina
-			# visualisation = draw_info_about_the_closest(img=visualisation, points=peoplePoints, maxDistance=100)
+				# associo all'immagine un tag per ogni persona con scritto la distanza della persona piu vicina
+				# visualisation = draw_info_about_the_closest(img=visualisation, points=peoplePoints, maxDistance=100)
 
-			visualisation = (visualisation[:, :, ::-1] * 255).astype(np.uint8)
-			print("└> Saving visualisation to {}".format(vis_save_path))
-			cv2.imwrite(vis_save_path, visualisation)
+				visualisation = (visualisation[:, :, ::-1] * 255).astype(np.uint8)
+				print("└> Saving visualisation to {}".format(vis_save_path))
+				cv2.imwrite(vis_save_path, visualisation)
+
+			else:
+				hidden_ground = cv2.resize(pred[1], original_image.size) > 0.95
+				feet = find_clusters_db_scan(hidden_ground)
+				feet = np.expand_dims(feet, axis=2).astype(np.int)
+				hidden_depth = cv2.resize(sigmoid_to_depth(pred[3]), original_image.size)
+				original_image = np.array(original_image) / 255.0
+
+				# normalise the relevant parts of the depth map and apply colormap
+				_max = hidden_depth[hidden_ground].max()
+				_min = hidden_depth[hidden_ground].min()
+				hidden_depth = (hidden_depth - _min) / (_max - _min)
+				depth_colourmap = self.colormap(hidden_depth)[:, :, :3]  # ignore alpha channel
+
+				# create and save visualisation image
+				hidden_ground = hidden_ground[:, :, None]
+
+				visualisation = original_image * (1 - hidden_ground) + depth_colourmap * hidden_ground
+
+				visualisation = original_image * (1 - feet) + feet * depth_colourmap
+				vis_save_path = os.path.join(self.save_dir, "visualisations", filename + '_clust_1.jpg')
+				print(visualisation.shape)
+
+				visualisation = (visualisation[:, :, ::-1] * 255).astype(np.uint8)
+				print("└> Saving visualisation to {}".format(vis_save_path))
+				cv2.imwrite(vis_save_path, visualisation)
+
 
 
 if __name__ == '__main__':
-	args = parse_args()
-	inference_manager = ObstacleManager(
-		model_name=args.model,
-		use_cuda=torch.cuda.is_available() and not args.no_cuda,
-		save_visualisations=not args.no_save_vis,
-		save_dir=args.save_dir)
-	inference_manager.predict(image_path=args.image)
+	#args = parse_args()
+	#inference_manager = ObstacleManager(
+	#	model_name=args.model,
+	#	use_cuda=torch.cuda.is_available() and not args.no_cuda,
+	#	save_visualisations=not args.no_save_vis,
+	#	save_dir=args.save_dir)
+	#inference_manager.predict(image_path=args.image)
+    inference_manager = ObstacleManager(
+        model_name="handheld",
+        use_cuda=False,
+        save_visualisations=True,
+        save_dir=".")
+    inference_manager.predict(image_path="./test_data/pompieri.jpg")
 
 
 
